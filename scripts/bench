@@ -1,12 +1,14 @@
 #!/bin/sh
 # Entry point of the erofs read benchmark.
 #
-#   bench build-image [options]   Linux host: fetch the dataset, build makefs
-#                                 and create the disk image.
-#   bench run [options] [board..] FreeBSD target: run the boards (default all).
+#   bench run --mount <target> [board..]
+#       FreeBSD target, one command: download the images (skipped when they are
+#       already there), mount them, benchmark. Targets: erofs ufs zfs ext4.
+#       The kernel with erofs must be installed and booted already.
 #   bench list                    List the boards.
+#   bench build-image [options]   Linux host: build the images locally.
 #
-# Run "bench build-image -h" and "bench run -h" for the options.
+# Run "bench run -h" for the options.
 set -e
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -15,7 +17,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 BOARDS="1 2 3 4 5"
 
 usage() {
-	sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
@@ -56,13 +58,16 @@ cmd_run() {
 	RUNS=5
 	OUT=
 	WORK=
-	EROFS_MODE=module
+	# The kernel with erofs is installed and booted beforehand
+	# (dangerous-install-kernel.sh), so erofs comes from the running kernel.
+	EROFS_MODE=kernel
 	EROFS_SRC=
 	EROFS_KO=
 	verify=1
 	PARTS=
 	IMAGES_DIR=./benchmark-images
 	reuse=0
+	IMAGE_MODE=part
 	MEASURE=
 	# getopts has no long options: handle --mount <target> before parsing.
 	# The target may be repeated or comma separated.
@@ -78,7 +83,7 @@ cmd_run() {
 			continue
 		fi
 		case $a in
-		--mount) reuse=1; want=1 ;;
+		--mount) IMAGE_MODE=file; want=1 ;;
 		--*) die "unknown option: $a" ;;
 		*) set -- "$@" "$a" ;;
 		esac
@@ -102,33 +107,34 @@ cmd_run() {
 		R) reuse=1 ;;
 		x) verify=0 ;;
 		h) cat <<USAGE
-usage: bench run -p <target>=<device> [-p ...] [--mount <target>] [-i image dir]
-                 [-n runs] [-e module|kernel] [-s erofs-freebsd tree]
-                 [-k erofs.ko] [-o result dir] [-w work dir] [-R] [-x] [board..]
-Targets: erofs (the uncompressed image), ufs, zfs, ext4.
-  -p  the partition of one target, repeatable. erofs is always needed, because
-      the file list that the other targets are checked against is read from it.
-      A target without a partition is not measured. For example:
-      -p erofs=/dev/ada1p4 -p ufs=/dev/ada1p5 -p zfs=/dev/ada1p6 -p ext4=/dev/ada1p7
+usage: bench run --mount <target> [-n runs] [-i image dir] [-o result dir] [board..]
+Targets: erofs (the uncompressed image), ufs, zfs, ext4. A comma list or a
+repeated option selects several: --mount ufs,zfs  or  --mount ufs --mount zfs.
+
   --mount <target>
-      do not download and do not dd: mount the partition of <target> as it is
-      (it must already hold its image) and benchmark only that target. May be
-      repeated or comma separated: --mount ufs --mount zfs, --mount ufs,zfs.
-      The erofs partition is mounted too, to read the file list.
-  -R  like --mount, for every target that has a partition
-  -i  directory of the release parts, default ./benchmark-images
+      Fully automatic, nothing is written to any disk or partition:
+        1. the parts benchmark-images.tar.gz.01, .02, ... of the latest release
+           of imrcpan/erofs-freebsd-benchmark are downloaded into the image
+           directory, unless they, or the unpacked images, are already there;
+        2. they are unpacked into the image directory;
+        3. the image file of the target is attached read-only with mdconfig and
+           mounted; the device and the mount point are printed;
+        4. the benchmark runs on it.
+      The erofs image is mounted too, to read the file list that the other
+      targets are checked against.
+  -i  directory of the release parts and images, default ./benchmark-images
   -n  rounds per target and workload, default 5
-  -e  erofs mode: module builds and loads erofs.ko (default),
-      kernel uses erofs of the running kernel
-  -s  erofs-freebsd source tree (module mode)
-  -k  prebuilt erofs.ko (module mode)
+  -o  result directory, default results/<time>
   -x  skip the content verification pass
-Without --mount and -R, the parts benchmark-images.tar.gz.01, .02, ... of the
-latest release of imrcpan/erofs-freebsd-benchmark are downloaded into the image
-directory (skipped when they, or the unpacked images, are already there),
-unpacked, and written with dd straight into the partitions. THE CONTENTS OF
-THESE PARTITIONS ARE DESTROYED. Each must be at least as big as its image. The
-partitions are created by you. Nothing is copied into a mounted file system.
+Other options: -e module|kernel (default kernel: erofs of the running kernel;
+module builds erofs.ko with -s <erofs-freebsd tree> or loads -k <erofs.ko>),
+-w <work dir>.
+
+Writing the images into partitions with dd instead (the partitions are created
+by you, THEIR CONTENTS ARE DESTROYED):
+  bench run -p <target>=<device> [-p ...]      download, unpack, dd, measure
+  bench run -R -p <target>=<device> [-p ...]   partitions already written:
+                                               mount them and measure
 USAGE
 		   exit 0 ;;
 		*) usage ;;
@@ -137,7 +143,12 @@ USAGE
 	shift $((OPTIND - 1))
 	[ "$(uname -s)" = FreeBSD ] || die "bench run must run on FreeBSD"
 	[ "$(id -u)" -eq 0 ] || die "bench run needs root"
-	[ -n "$PARTS" ] || die "bench run needs -p <target>=<device>; run bench run -h"
+	if [ "$IMAGE_MODE" = file ]; then
+		[ -z "$PARTS" ] && [ "$reuse" -eq 0 ] ||
+		    die "--mount cannot be combined with -p or -R"
+	else
+		[ -n "$PARTS" ] || die "bench run needs --mount <target> (or -p <target>=<device>); run bench run -h"
+	fi
 	boards=${*:-$BOARDS}
 	[ "$boards" = all ] && boards=$BOARDS
 
@@ -155,11 +166,21 @@ USAGE
 	rm -rf "$META"
 	mkdir -p "$META"
 	. "$here/lib/images.sh"
-	for t in $MEASURE; do
-		[ -n "$(part_dev "$t")" ] || die "--mount $t needs -p $t=<device>"
-	done
+	if [ "$IMAGE_MODE" = part ]; then
+		for t in $MEASURE; do
+			[ -n "$(part_dev "$t")" ] || die "$t needs -p $t=<device>"
+		done
+	fi
 
-	if [ "$reuse" -eq 0 ]; then
+	export IMAGE_MODE IMAGES_DIR
+	if [ "$IMAGE_MODE" = file ]; then
+		images_fetch "$IMAGES_DIR"
+		images_extract "$IMAGES_DIR"
+		IMAGES_DIR=$(cd "$IMAGES_DIR" && pwd)
+		for t in $MEASURE erofs-none; do
+			[ -s "$(image_file "$t")" ] || die "no image for $t in $IMAGES_DIR"
+		done
+	elif [ "$reuse" -eq 0 ]; then
 		images_fetch "$IMAGES_DIR"
 		images_extract "$IMAGES_DIR"
 		images_write "$IMAGES_DIR"
@@ -169,6 +190,7 @@ USAGE
 			[ -c "${w#*=}" ] || die "${w#*=} is not a disk device"
 		done
 	fi
+	trap fs_cleanup EXIT INT TERM HUP
 
 	RDBENCH=$WORK/rdbench
 	build_rdbench "$RDBENCH" "$here"

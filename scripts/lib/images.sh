@@ -79,6 +79,14 @@ images_extract() {
 	rm -rf "$tmp"
 }
 
+# image_file <variant> prints the path of the unpacked image of the variant.
+image_file() {
+	for m in $IMAGES_MAP; do
+		[ "${m##*:}" = "$1" ] && { echo "$IMAGES_DIR/${m%%:*}"; return 0; }
+	done
+	return 1
+}
+
 # The partitions are given by the user, one per variant: PARTS holds words
 # "<variant>=<device>", for example "erofs-none=/dev/ada1p4 ufs=/dev/ada1p5".
 # part_dev <variant> prints the device, or nothing.

@@ -23,15 +23,14 @@ Cross file system boards use only uncompressed images.
    golden image dataset: erofs and ext4 on Linux, UFS and ZFS with the makefs of
    a FreeBSD virtual machine. They are published as the parts
    `benchmark-images.tar.gz.01`, `.02`, ... of a release, at most 1 GB each.
-2. On FreeBSD `scripts/bench run -p <variant>=<device> ...` downloads the parts of the latest
-   release into `./benchmark-images/` (skipped when they are already there),
-   unpacks them, and writes each image with `dd` straight into the partition
-   you gave for it (`-p <variant>=<device>`). You create the partitions, bench
-   only writes into them, and nothing is ever copied into a mounted file
-   system. The contents of the partitions are destroyed.
-3. It then mounts each variant read-only from its partition, reads the
-   files with `tools/rdbench.c`, and writes `raw.csv`, `summary.md` and
-   `env.txt` into `results/<time>/`.
+2. On FreeBSD `scripts/bench run --mount <target>` downloads the parts of the latest
+   release into `./benchmark-images/` (skipped when they are already there) and
+   unpacks them.
+3. It attaches the image file of each target read-only with `mdconfig`, mounts
+   it, prints the device and the mount point, reads the files with
+   `tools/rdbench.c`, and writes `raw.csv`, `summary.md` and `env.txt` into
+   `results/<time>/`. Nothing is written to a disk. With `-p` the images are
+   instead written with `dd` into partitions you created, and read from there.
 
 The release holds only the uncompressed erofs image, so board 5 (compression)
 is skipped until compressed erofs images are on the disk.
@@ -47,7 +46,10 @@ is skipped until compressed erofs images are on the disk.
   it. A variant that returns different data aborts the run.
 - Only the open/read/close loop is timed. The file order of boards 2 and 3 comes
   from the manifest and a fixed seed, so it is identical on all file systems.
-- When the disk is a virtual disk, attach it with host caching off (for QEMU,
+- Reading an image file goes through the cache of the file system that holds
+  the file (the `--mount` mode). For numbers that do not include that cache, use
+  `-p` and read from partitions. When the disk is a virtual disk, give it host
+  caching off (for QEMU,
   `cache=none`), or the numbers include the host page cache.
 
 ## erofs modes
@@ -55,7 +57,7 @@ is skipped until compressed erofs images are on the disk.
 `bench run -e module -s <erofs-freebsd tree>` builds `erofs.ko` from the tree
 against the running system and loads it. The `__FreeBSD_version` of the tree
 and of the running system must match. `-k <erofs.ko>` uses a prebuilt module.
-`bench run -e kernel` expects erofs in the running kernel.
+`bench run` uses the erofs of the running kernel by default (`-e kernel`).
 
 ## Run benchmark
 
@@ -80,7 +82,30 @@ benchmark/scripts/bench run --mount <bench-target>
 
 `bench-target`:
 
-- erofs
+- erofs (the uncompressed image)
 - ufs
 - zfs
 - ext4
+
+Several targets can be given, comma separated or by repeating the option, and
+boards can be picked at the end:
+
+```sh
+benchmark/scripts/bench run --mount ufs,zfs,erofs,ext4     # everything
+benchmark/scripts/bench run --mount ufs --mount erofs 1 4  # boards 1 and 4
+```
+
+It downloads the release parts into `./benchmark-images/` unless they are
+already there, unpacks them, attaches each image file read-only with `mdconfig`,
+mounts it, prints the device and the mount point, and benchmarks. Nothing is
+written to a disk. The erofs image is always mounted too, to read the file list
+that the other targets are checked against. erofs comes from the running kernel.
+
+Writing the images into partitions of your own (they are destroyed) is the
+alternative, and then the file system is read from the partition itself:
+
+```sh
+benchmark/scripts/bench run -p erofs=/dev/ada1p4 -p ufs=/dev/ada1p5 \
+    -p zfs=/dev/ada1p6 -p ext4=/dev/ada1p7           # download, dd, measure
+benchmark/scripts/bench run -R -p erofs=/dev/ada1p4 -p ufs=/dev/ada1p5   # already written
+```
