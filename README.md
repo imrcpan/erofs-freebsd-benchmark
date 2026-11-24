@@ -1,4 +1,4 @@
-# erofs-freebsd read benchmark
+# EROFS FreeBSD Benchmark
 
 Read benchmark for erofs on FreeBSD against the other on-disk file systems
 (UFS, ZFS, ext2fs/ext4). Everything is driven by `scripts/bench`.
@@ -57,24 +57,30 @@ against the running system and loads it. The `__FreeBSD_version` of the tree
 and of the running system must match. `-k <erofs.ko>` uses a prebuilt module.
 `bench run -e kernel` expects erofs in the running kernel.
 
-## Usage
+## Run benchmark
 
-CI, from the Actions tab: run the `build-images` workflow.
+**It is highly recommended to run this on a dedicated machine, as the kernel will need to be upgraded to a test version.**
 
-FreeBSD target. Create four partitions yourself (the sizes of the images in
-the release, or bigger), then pass them; all of their data is lost. The targets
-are erofs (uncompressed), ufs, zfs and ext4:
+Download kernel bin from https://github.com/imrcpan/erofs-freebsd-releases/releases/latest
 
-    scripts/bench run -e kernel \
-        -p erofs=/dev/ada1p4 -p ufs=/dev/ada1p5 \
-        -p zfs=/dev/ada1p6 -p ext4=/dev/ada1p7
+Then install the kernel:
 
-The partitions already hold the images (no download, no dd), benchmark only ufs
-and zfs, boards 1 and 4:
+```sh
+git clone https://github.com/imrcpan/erofs-freebsd-benchmark.git benchmark
+benchmark/scripts/dangerous-install-kernel.sh -f ./erofs_freebsd_kernel_amd64_*
 
-    scripts/bench run -e kernel --mount ufs --mount zfs \
-        -p erofs=/dev/ada1p4 -p ufs=/dev/ada1p5 -p zfs=/dev/ada1p6 1 4
+reboot
+```
 
-The kernel with erofs comes from the latest release of
-`imrcpan/erofs-freebsd-releases` (`erofs_freebsd_kernel_amd64_*.tar.gz`, the
-non-debug kernel); `scripts/dangerous-install-kernel.sh -f <tar.gz>` installs it.
+Then start benchmark:
+
+```sh
+benchmark/scripts/bench run --mount <bench-target>
+```
+
+`bench-target`:
+
+- erofs
+- ufs
+- zfs
+- ext4
