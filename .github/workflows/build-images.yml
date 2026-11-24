@@ -2,7 +2,15 @@ name: build-images
 
 # Build the uncompressed erofs, ext4, ufs and zfs images of the golden image
 # dataset and publish them as a release, split into parts of at most 1 GB.
-# Unpack with: cat benchmark-images.tar.gz.* | tar -xzf -
+#
+#   dataset       download the dataset once, so that all images share it
+#   linux-images  erofs and ext4, built on the Linux runner
+#   ufs, zfs      built with the makefs of a FreeBSD virtual machine,
+#                 one job per file system, in parallel
+#   release       pack, split and publish
+#
+# Unpack the release with: cat benchmark-images.tar.gz.* | tar -xzf -
+# No cache is used anywhere and every artifact is kept for one day.
 
 on:
   workflow_dispatch:
@@ -16,9 +24,76 @@ permissions:
   contents: write
 
 jobs:
-  images:
+  dataset:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            e2fsprogs android-sdk-libsparse-utils unzip curl
+
+      - name: fetch the dataset
+        run: |
+          scripts/host/fetch-dataset.sh -p full work/dataset work/cache
+          rm -rf work/cache
+          tar -C work -czf work/dataset.tar.gz dataset
+          ls -l work/dataset.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dataset
+          path: work/dataset.tar.gz
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+  linux-images:
+    needs: dataset
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends erofs-utils e2fsprogs
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dataset
+          path: work
+
+      - name: build erofs and ext4
+        run: |
+          tar -C work -xzf work/dataset.tar.gz
+          rm work/dataset.tar.gz
+          scripts/host/build-images.sh -n -v "erofs-none ext4" \
+            work/dataset work/out
+          ls -l work/out/img
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-linux
+          path: |
+            work/out/img/erofs-none.img
+            work/out/img/ext4.img
+          retention-days: 1
+          compression-level: 1
+          if-no-files-found: error
+
+  freebsd-images:
+    needs: dataset
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: true
+      matrix:
+        variant: [ufs, zfs]
     steps:
       - uses: actions/checkout@v4
 
@@ -27,37 +102,61 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
-      - name: install host tools
+      - uses: actions/download-artifact@v4
+        with:
+          name: dataset
+          path: work
+
+      - name: unpack the dataset
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            erofs-utils e2fsprogs android-sdk-libsparse-utils unzip curl \
-            clang lld python3 bc time
-          # make.py wants unversioned names
-          clangcpp=$(ls /usr/bin/clang-cpp-* | sort -V | tail -n 1)
-          sudo ln -sf "$clangcpp" /usr/local/bin/clang-cpp
-          command -v mkfs.erofs mkfs.ext4 debugfs simg2img clang-cpp ld.lld
+          tar -C work -xzf work/dataset.tar.gz
+          rm work/dataset.tar.gz
 
-      - name: fetch the FreeBSD source tree for makefs
-        run: git clone --depth 1 https://github.com/imrcpan/erofs-freebsd work/src
+      # nfs keeps the dataset and the image on the runner disk, not on the
+      # small disk of the virtual machine.
+      - name: build the ${{ matrix.variant }} image in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15"
+          sync: nfs
+          disable-cache: true
+          run: |
+            freebsd-version
+            sh scripts/freebsd/build-images.sh -v ${{ matrix.variant }} \
+              work/dataset work/${{ matrix.variant }}.img
 
-      - name: fetch the dataset
-        run: scripts/host/fetch-dataset.sh -p full work/dataset work/cache
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.variant }}
+          path: work/${{ matrix.variant }}.img
+          retention-days: 1
+          compression-level: 1
+          if-no-files-found: error
 
-      - name: build makefs
-        run: scripts/host/build-makefs.sh work/src work/build
+  release:
+    needs: [linux-images, freebsd-images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: build the images
+      - name: free disk space
         run: |
-          scripts/host/build-images.sh -n -v "erofs-none ufs zfs ext4" \
-            -m work/build/bin/makefs work/dataset work/out
-          ls -l work/out/img
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-*
+          path: work/img
+          merge-multiple: true
 
       - name: pack and split
-        run: scripts/linux/package-images.sh work/out/img work/release
+        run: |
+          ls -l work/img
+          scripts/linux/package-images.sh work/img work/release
 
-      - name: upload the parts as an artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: benchmark-images
           path: work/release/benchmark-images.tar.gz.*

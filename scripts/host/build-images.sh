@@ -41,7 +41,12 @@ out=$2
 mkdir -p "$out/img" "$out/meta"
 out=$(cd "$out" && pwd)
 
-[ -n "$makefs" ] && [ -x "$makefs" ] || die "makefs not found, use -m or build it with build-makefs.sh"
+# makefs is only needed for the ufs and zfs variants.
+case " $variants " in
+*" ufs "*|*" zfs "*)
+	[ -n "$makefs" ] && [ -x "$makefs" ] || die "makefs not found, use -m or build it with build-makefs.sh"
+	;;
+esac
 for c in mkfs.erofs mkfs.ext4 truncate dd tar du; do need_cmd "$c"; done
 [ "$nodisk" -eq 1 ] || need_cmd sgdisk
 
