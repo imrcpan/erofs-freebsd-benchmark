@@ -82,7 +82,7 @@ benchmark/scripts/bench run --mount <bench-target>
 
 `bench-target`:
 
-- erofs (the uncompressed image)
+- erofs
 - ufs
 - zfs
 - ext4
@@ -95,14 +95,7 @@ benchmark/scripts/bench run --mount ufs,zfs,erofs,ext4     # everything
 benchmark/scripts/bench run --mount ufs --mount erofs 1 4  # boards 1 and 4
 ```
 
-It downloads the release parts into `./benchmark-images/` unless they are
-already there, unpacks them, attaches each image file read-only with `mdconfig`,
-mounts it, prints the device and the mount point, and benchmarks. Nothing is
-written to a disk. The erofs image is always mounted too, to read the file list
-that the other targets are checked against. erofs comes from the running kernel.
-
-Writing the images into partitions of your own (they are destroyed) is the
-alternative, and then the file system is read from the partition itself:
+Another choice is directly writing into partitions instead of using image files:
 
 ```sh
 benchmark/scripts/bench run -p erofs=/dev/ada1p4 -p ufs=/dev/ada1p5 \
