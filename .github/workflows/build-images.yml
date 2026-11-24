@@ -1,0 +1,76 @@
+name: build-images
+
+# Build the uncompressed erofs, ext4, ufs and zfs images of the golden image
+# dataset and publish them as a release, split into parts of at most 1 GB.
+# Unpack with: cat benchmark-images.tar.gz.* | tar -xzf -
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: release tag, default images-<date>-<run number>
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            erofs-utils e2fsprogs android-sdk-libsparse-utils unzip curl \
+            clang lld python3 bc time
+          # make.py wants unversioned names
+          clangcpp=$(ls /usr/bin/clang-cpp-* | sort -V | tail -n 1)
+          sudo ln -sf "$clangcpp" /usr/local/bin/clang-cpp
+          command -v mkfs.erofs mkfs.ext4 debugfs simg2img clang-cpp ld.lld
+
+      - name: fetch the FreeBSD source tree for makefs
+        run: git clone --depth 1 https://github.com/imrcpan/erofs-freebsd work/src
+
+      - name: fetch the dataset
+        run: scripts/host/fetch-dataset.sh -p full work/dataset work/cache
+
+      - name: build makefs
+        run: scripts/host/build-makefs.sh work/src work/build
+
+      - name: build the images
+        run: |
+          scripts/host/build-images.sh -n -v "erofs-none ufs zfs ext4" \
+            -m work/build/bin/makefs work/dataset work/out
+          ls -l work/out/img
+
+      - name: pack and split
+        run: scripts/linux/package-images.sh work/out/img work/release
+
+      - name: upload the parts as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-images
+          path: work/release/benchmark-images.tar.gz.*
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          tag=${TAG_INPUT:-images-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}}
+          gh release create "$tag" work/release/benchmark-images.tar.gz.* \
+            --title "$tag" \
+            --notes "Uncompressed erofs, ext4, ufs and zfs images of the golden image dataset. Unpack with: cat benchmark-images.tar.gz.* | tar -xzf -"
