@@ -62,6 +62,10 @@ if [ "$profile" = full ]; then
 
 	if [ ! -d "$dataset/aosp_system" ]; then
 		need_cmd debugfs
+		# rdump restores the owners of the files and exits 0 even when that
+		# fails, so a non-root run would silently lose them.
+		[ "$(id -u)" -eq 0 ] ||
+		    die "the full profile must run as root (debugfs rdump restores file owners)"
 		download "$AOSP_URL" "$cache/gsi.zip"
 		rm -rf "$cache/gsi" "$dataset/aosp_system.tmp"
 		mkdir -p "$cache/gsi" "$dataset/aosp_system.tmp"
@@ -75,8 +79,13 @@ if [ "$profile" = full ]; then
 			mv "$img.raw" "$img"
 		fi
 		# rdump copies the tree without mounting the image.
-		debugfs -R "rdump / $dataset/aosp_system.tmp" "$img" ||
-		    die "debugfs rdump failed"
+		dumplog=$cache/rdump.log
+		debugfs -R "rdump / $dataset/aosp_system.tmp" "$img" >"$dumplog" 2>&1 ||
+		    die "debugfs rdump failed, see $dumplog"
+		if grep -q -E "rdump:|dump_file:" "$dumplog"; then
+			head -n 5 "$dumplog" >&2
+			die "debugfs rdump reported errors, see $dumplog"
+		fi
 		mv "$dataset/aosp_system.tmp" "$dataset/aosp_system"
 		rm -rf "$cache/gsi"
 	fi

@@ -36,11 +36,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             e2fsprogs android-sdk-libsparse-utils unzip curl
 
+      # Root is needed: debugfs rdump restores the owners of the Android files
+      # (uid 0, 2000, ...), and some files are not readable by other users. The
+      # owners end up in the images, so they must survive into the tarball.
       - name: fetch the dataset
         run: |
-          scripts/host/fetch-dataset.sh -p full work/dataset work/cache
-          rm -rf work/cache
-          tar -C work -czf work/dataset.tar.gz dataset
+          sudo scripts/host/fetch-dataset.sh -p full work/dataset work/cache
+          sudo rm -rf work/cache
+          sudo tar -C work -czf work/dataset.tar.gz dataset
+          sudo chown "$(id -u):$(id -g)" work/dataset.tar.gz
           ls -l work/dataset.tar.gz
 
       - uses: actions/upload-artifact@v4
@@ -68,12 +72,14 @@ jobs:
           name: dataset
           path: work
 
+      # Root again, to keep the owners of the dataset and to read all files.
       - name: build erofs and ext4
         run: |
-          tar -C work -xzf work/dataset.tar.gz
+          sudo tar -C work -xzf work/dataset.tar.gz
           rm work/dataset.tar.gz
-          scripts/host/build-images.sh -n -v "erofs-none ext4" \
+          sudo scripts/host/build-images.sh -n -v "erofs-none ext4" \
             work/dataset work/out
+          sudo chown -R "$(id -u):$(id -g)" work/out
           ls -l work/out/img
 
       - uses: actions/upload-artifact@v4
@@ -107,23 +113,24 @@ jobs:
           name: dataset
           path: work
 
-      - name: unpack the dataset
-        run: |
-          tar -C work -xzf work/dataset.tar.gz
-          rm work/dataset.tar.gz
-
-      # nfs keeps the dataset and the image on the runner disk, not on the
-      # small disk of the virtual machine.
+      # nfs maps every user of the virtual machine to the runner user, so the
+      # owners of the dataset would be lost there. The tarball is therefore
+      # unpacked as root onto a tmpfs inside the machine, and only the image is
+      # written back to the shared workspace.
       - name: build the ${{ matrix.variant }} image in FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
           release: "15"
           sync: nfs
+          mem: 10240
           disable-cache: true
           run: |
             freebsd-version
+            mkdir -p /mnt/ds
+            mount -t tmpfs -o size=4g tmpfs /mnt/ds
+            tar -C /mnt/ds -xzf work/dataset.tar.gz
             sh scripts/freebsd/build-images.sh -v ${{ matrix.variant }} \
-              work/dataset work/${{ matrix.variant }}.img
+              /mnt/ds/dataset work/${{ matrix.variant }}.img
 
       - uses: actions/upload-artifact@v4
         with:
