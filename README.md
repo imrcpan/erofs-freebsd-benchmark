@@ -19,17 +19,22 @@ Cross file system boards use only uncompressed images.
 
 ## How it works
 
-1. On a Linux host `scripts/bench build-image` downloads the dataset, bootstraps
-   `makefs` from a FreeBSD source tree, and builds one image per variant
-   (`mkfs.erofs`, `makefs -t ffs`, `makefs -t zfs`, `mkfs.ext4`). The images
-   are written into GPT partitions of a single raw disk image, `bench.img`.
-   The label of each partition is the variant name. A `meta` partition holds
-   the layout and a manifest with size and hash of every file.
-2. The disk image is written to the disk of the FreeBSD machine. Nothing is
-   ever copied into the partitions on the FreeBSD side.
-3. On FreeBSD `scripts/bench run` mounts each variant read-only from
-   `/dev/gpt/<label>`, reads the files with `tools/rdbench.c`, and writes
-   `raw.csv`, `summary.md` and `env.txt` into `results/<time>/`.
+1. CI (`.github/workflows/build-images.yml`) builds uncompressed images of the
+   golden image dataset: erofs and ext4 on Linux, UFS and ZFS with the makefs of
+   a FreeBSD virtual machine. They are published as the parts
+   `benchmark-images.tar.gz.01`, `.02`, ... of a release, at most 1 GB each.
+2. On FreeBSD `scripts/bench run -p <variant>=<device> ...` downloads the parts of the latest
+   release into `./benchmark-images/` (skipped when they are already there),
+   unpacks them, and writes each image with `dd` straight into the partition
+   you gave for it (`-p <variant>=<device>`). You create the partitions, bench
+   only writes into them, and nothing is ever copied into a mounted file
+   system. The contents of the partitions are destroyed.
+3. It then mounts each variant read-only from its partition, reads the
+   files with `tools/rdbench.c`, and writes `raw.csv`, `summary.md` and
+   `env.txt` into `results/<time>/`.
+
+The release holds only the uncompressed erofs image, so board 5 (compression)
+is skipped until compressed erofs images are on the disk.
 
 ## Accuracy measures
 
@@ -37,8 +42,9 @@ Cross file system boards use only uncompressed images.
   measurement is cold, then the same workload runs again warm.
 - Variants alternate inside a round; all rounds are kept in `raw.csv`; the
   summary shows the median and the range.
-- Before measuring, every file of every variant is read and compared with the
-  hash in the manifest. A variant that returns wrong data aborts the run.
+- The manifest (size and hash of every file) is read from the erofs image.
+  Before measuring, every file of every other variant is read and compared with
+  it. A variant that returns different data aborts the run.
 - Only the open/read/close loop is timed. The file order of boards 2 and 3 comes
   from the manifest and a fixed seed, so it is identical on all file systems.
 - When the disk is a virtual disk, attach it with host caching off (for QEMU,
@@ -53,12 +59,22 @@ and of the running system must match. `-k <erofs.ko>` uses a prebuilt module.
 
 ## Usage
 
-Linux host:
+CI, from the Actions tab: run the `build-images` workflow.
 
-    scripts/bench build-image -w ./bench-work          # full dataset
-    scripts/bench build-image -p small -w ./bench-work # silesia and calgary only
+FreeBSD target. Create four partitions yourself (the sizes of the images in
+the release, or bigger), then pass them; all of their data is lost. The targets
+are erofs (uncompressed), ufs, zfs and ext4:
 
-FreeBSD target, with `bench.img` attached as a disk:
+    scripts/bench run -e kernel \
+        -p erofs=/dev/ada1p4 -p ufs=/dev/ada1p5 \
+        -p zfs=/dev/ada1p6 -p ext4=/dev/ada1p7
 
-    scripts/bench run -s /path/to/erofs-freebsd        # all boards
-    scripts/bench run -e kernel 1 4                    # boards 1 and 4
+The partitions already hold the images (no download, no dd), benchmark only ufs
+and zfs, boards 1 and 4:
+
+    scripts/bench run -e kernel --mount ufs --mount zfs \
+        -p erofs=/dev/ada1p4 -p ufs=/dev/ada1p5 -p zfs=/dev/ada1p6 1 4
+
+The kernel with erofs comes from the latest release of
+`imrcpan/erofs-freebsd-releases` (`erofs_freebsd_kernel_amd64_*.tar.gz`, the
+non-debug kernel); `scripts/dangerous-install-kernel.sh -f <tar.gz>` installs it.

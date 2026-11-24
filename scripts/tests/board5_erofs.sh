@@ -3,6 +3,14 @@
 # algorithm. Same workloads as boards 1, 3 and 4, plus an image size table.
 BOARD_ID=5
 board_main() {
+	n=0
+	for fs in $FS_EROFS; do
+		fs_present "$fs" && n=$((n + 1))
+	done
+	if [ "$n" -lt 2 ]; then
+		log "board 5 skipped: only $n erofs variant on the disk, the release holds the uncompressed one"
+		return 0
+	fi
 	run_matrix "$FS_EROFS" golden-walk \
 	    -w -m "$META/manifest.txt" -b "$BS_LARGE"
 	run_matrix "$FS_EROFS" large \
@@ -11,7 +19,8 @@ board_main() {
 	    -m "$META/manifest.txt" -u "$SMALL_MAX" -o shuffle \
 	    -R "$SHUFFLE_SEED" -b "$BS_SMALL"
 
-	# Image sizes come from the layout written on the host.
+	# Image sizes come from the layout written on the host, if there is one.
+	[ -f "$META/layout.txt" ] || return 0
 	total=$(awk -F'\t' '{s += $1} END {print s + 0}' "$META/manifest.txt")
 	{
 		echo ""

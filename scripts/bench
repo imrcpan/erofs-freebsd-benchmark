@@ -42,6 +42,16 @@ cmd_build_image() {
 	exec "$here/host/build-all.sh" "$@"
 }
 
+# Benchmark targets: erofs (the uncompressed image), ufs, zfs, ext4. Sets NORM
+# to the internal variant name.
+norm_target() {
+	case $1 in
+	erofs|erofs-none) NORM=erofs-none ;;
+	ufs|zfs|ext4) NORM=$1 ;;
+	*) die "unknown benchmark target: $1 (use erofs, ufs, zfs or ext4)" ;;
+	esac
+}
+
 cmd_run() {
 	RUNS=5
 	OUT=
@@ -50,7 +60,31 @@ cmd_run() {
 	EROFS_SRC=
 	EROFS_KO=
 	verify=1
-	while getopts n:o:w:e:s:k:xh o; do
+	PARTS=
+	IMAGES_DIR=./benchmark-images
+	reuse=0
+	MEASURE=
+	# getopts has no long options: handle --mount <target> before parsing.
+	# The target may be repeated or comma separated.
+	want=0
+	for a in "$@"; do
+		shift
+		if [ "$want" -eq 1 ]; then
+			want=0
+			for t in $(echo "$a" | tr ',' ' '); do
+				norm_target "$t"
+				MEASURE="$MEASURE $NORM"
+			done
+			continue
+		fi
+		case $a in
+		--mount) reuse=1; want=1 ;;
+		--*) die "unknown option: $a" ;;
+		*) set -- "$@" "$a" ;;
+		esac
+	done
+	[ "$want" -eq 0 ] || die "--mount needs a target: erofs, ufs, zfs or ext4"
+	while getopts n:o:w:e:s:k:p:i:Rxh o; do
 		case $o in
 		n) RUNS=$OPTARG ;;
 		o) OUT=$OPTARG ;;
@@ -58,18 +92,43 @@ cmd_run() {
 		e) EROFS_MODE=$OPTARG ;;
 		s) EROFS_SRC=$OPTARG ;;
 		k) EROFS_KO=$OPTARG ;;
+		p)
+			case $OPTARG in
+			*=*) norm_target "${OPTARG%%=*}"; PARTS="$PARTS $NORM=${OPTARG#*=}" ;;
+			*) die "-p needs <target>=<device>, for example -p ufs=/dev/ada1p5" ;;
+			esac
+			;;
+		i) IMAGES_DIR=$OPTARG ;;
+		R) reuse=1 ;;
 		x) verify=0 ;;
 		h) cat <<USAGE
-usage: bench run [-n runs] [-e module|kernel] [-s erofs-freebsd tree]
-                 [-k erofs.ko] [-o result dir] [-w work dir] [-x] [board..]
-  -n  rounds per variant and workload, default 5
+usage: bench run -p <target>=<device> [-p ...] [--mount <target>] [-i image dir]
+                 [-n runs] [-e module|kernel] [-s erofs-freebsd tree]
+                 [-k erofs.ko] [-o result dir] [-w work dir] [-R] [-x] [board..]
+Targets: erofs (the uncompressed image), ufs, zfs, ext4.
+  -p  the partition of one target, repeatable. erofs is always needed, because
+      the file list that the other targets are checked against is read from it.
+      A target without a partition is not measured. For example:
+      -p erofs=/dev/ada1p4 -p ufs=/dev/ada1p5 -p zfs=/dev/ada1p6 -p ext4=/dev/ada1p7
+  --mount <target>
+      do not download and do not dd: mount the partition of <target> as it is
+      (it must already hold its image) and benchmark only that target. May be
+      repeated or comma separated: --mount ufs --mount zfs, --mount ufs,zfs.
+      The erofs partition is mounted too, to read the file list.
+  -R  like --mount, for every target that has a partition
+  -i  directory of the release parts, default ./benchmark-images
+  -n  rounds per target and workload, default 5
   -e  erofs mode: module builds and loads erofs.ko (default),
       kernel uses erofs of the running kernel
   -s  erofs-freebsd source tree (module mode)
   -k  prebuilt erofs.ko (module mode)
   -x  skip the content verification pass
-The disk image from "bench build-image" must be attached; its partitions
-appear as /dev/gpt/<label>.
+Without --mount and -R, the parts benchmark-images.tar.gz.01, .02, ... of the
+latest release of imrcpan/erofs-freebsd-benchmark are downloaded into the image
+directory (skipped when they, or the unpacked images, are already there),
+unpacked, and written with dd straight into the partitions. THE CONTENTS OF
+THESE PARTITIONS ARE DESTROYED. Each must be at least as big as its image. The
+partitions are created by you. Nothing is copied into a mounted file system.
 USAGE
 		   exit 0 ;;
 		*) usage ;;
@@ -78,6 +137,7 @@ USAGE
 	shift $((OPTIND - 1))
 	[ "$(uname -s)" = FreeBSD ] || die "bench run must run on FreeBSD"
 	[ "$(id -u)" -eq 0 ] || die "bench run needs root"
+	[ -n "$PARTS" ] || die "bench run needs -p <target>=<device>; run bench run -h"
 	boards=${*:-$BOARDS}
 	[ "$boards" = all ] && boards=$BOARDS
 
@@ -91,17 +151,30 @@ USAGE
 	. "$here/lib/fsops.sh"
 	. "$here/lib/runner.sh"
 
-	# Read the layout and the manifest from the meta partition.
 	META=$WORK/meta
 	rm -rf "$META"
 	mkdir -p "$META"
-	[ -e /dev/gpt/meta ] || die "/dev/gpt/meta not found, is the disk image attached?"
-	tar -xf /dev/gpt/meta -C "$META" || die "cannot read the meta partition"
+	. "$here/lib/images.sh"
+	for t in $MEASURE; do
+		[ -n "$(part_dev "$t")" ] || die "--mount $t needs -p $t=<device>"
+	done
+
+	if [ "$reuse" -eq 0 ]; then
+		images_fetch "$IMAGES_DIR"
+		images_extract "$IMAGES_DIR"
+		images_write "$IMAGES_DIR"
+	else
+		[ -n "$(part_dev erofs-none)" ] || die "-p erofs=<device> is needed to read the file list"
+		for w in $PARTS; do
+			[ -c "${w#*=}" ] || die "${w#*=} is not a disk device"
+		done
+	fi
 
 	RDBENCH=$WORK/rdbench
 	build_rdbench "$RDBENCH" "$here"
 
 	erofs_setup
+	images_manifest
 	fs_describe >"$OUT/env.txt"
 	echo "erofs_mode=$EROFS_MODE runs=$RUNS" >>"$OUT/env.txt"
 	[ -n "$EROFS_KO" ] && sha256 -q "$EROFS_KO" >>"$OUT/env.txt"

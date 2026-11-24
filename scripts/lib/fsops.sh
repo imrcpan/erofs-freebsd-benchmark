@@ -1,6 +1,6 @@
 #!/bin/sh
 # Mount and unmount the file system variants on FreeBSD. The images are read
-# straight from their GPT partitions, /dev/gpt/<label>. Every mount is
+# straight from the partitions the user gave (part_dev). Every mount is
 # read-only and nothing is written to the partitions.
 #
 # After fs_mount, DATA_ROOT is the directory holding the dataset.
@@ -12,19 +12,19 @@ fs_mount() {
 	mkdir -p "$MNT"
 	case $fs in
 	erofs-*)
-		mount -t erofs -o ro "/dev/gpt/$fs" "$MNT" || return 1
+		mount -t erofs -o ro "$(part_dev "$fs")" "$MNT" || return 1
 		DATA_ROOT=$MNT
 		;;
 	ufs)
-		mount -t ufs -o ro "/dev/gpt/$fs" "$MNT" || return 1
+		mount -t ufs -o ro "$(part_dev "$fs")" "$MNT" || return 1
 		DATA_ROOT=$MNT
 		;;
 	ext4)
-		mount -t ext2fs -o ro "/dev/gpt/$fs" "$MNT" || return 1
+		mount -t ext2fs -o ro "$(part_dev "$fs")" "$MNT" || return 1
 		DATA_ROOT=$MNT
 		;;
 	zfs)
-		zpool import -o readonly=on -o cachefile=none -d /dev/gpt \
+		zpool import -o readonly=on -o cachefile=none -d "$(part_dev "$fs")" \
 		    -R "$MNT" "$BENCH_POOL" || return 1
 		DATA_ROOT=$(zfs get -H -o value mountpoint "$BENCH_POOL")
 		;;
@@ -50,9 +50,15 @@ fs_umount() {
 	return 1
 }
 
-# True if the layout lists the variant and the partition exists.
+# True if a partition was given for the variant and, when --mount selected
+# targets, the variant is one of them.
 fs_present() {
-	grep -q "^$1|" "$META/layout.txt" && [ -e "/dev/gpt/$1" ]
+	[ -n "$(part_dev "$1")" ] || return 1
+	[ -z "${MEASURE:-}" ] && return 0
+	case " $MEASURE " in
+	*" $1 "*) return 0 ;;
+	esac
+	return 1
 }
 
 # Print a description of the kernel and tunables.
