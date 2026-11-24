@@ -1,0 +1,145 @@
+#!/bin/sh
+# Entry point of the erofs read benchmark.
+#
+#   bench build-image [options]   Linux host: fetch the dataset, build makefs
+#                                 and create the disk image.
+#   bench run [options] [board..] FreeBSD target: run the boards (default all).
+#   bench list                    List the boards.
+#
+# Run "bench build-image -h" and "bench run -h" for the options.
+set -e
+
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/lib/common.sh"
+
+BOARDS="1 2 3 4 5"
+
+usage() {
+	sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+	exit "${1:-2}"
+}
+
+board_file() {
+	case $1 in
+	1) echo "$here/tests/board1_large.sh" ;;
+	2) echo "$here/tests/board2_small_seq.sh" ;;
+	3) echo "$here/tests/board3_small_rand.sh" ;;
+	4) echo "$here/tests/board4_golden.sh" ;;
+	5) echo "$here/tests/board5_erofs.sh" ;;
+	*) die "no such board: $1" ;;
+	esac
+}
+
+cmd_list() {
+	echo "1  large file sequential read        (erofs ufs zfs ext4, uncompressed)"
+	echo "2  small files, sorted order         (erofs ufs zfs ext4, uncompressed)"
+	echo "3  small files, random order         (erofs ufs zfs ext4, uncompressed)"
+	echo "4  golden image full tree read       (erofs ufs zfs ext4, uncompressed)"
+	echo "5  erofs compression algorithms      (erofs none lz4 lz4hc lzma deflate zstd)"
+}
+
+cmd_build_image() {
+	exec "$here/host/build-all.sh" "$@"
+}
+
+cmd_run() {
+	RUNS=5
+	OUT=
+	WORK=
+	EROFS_MODE=module
+	EROFS_SRC=
+	EROFS_KO=
+	verify=1
+	while getopts n:o:w:e:s:k:xh o; do
+		case $o in
+		n) RUNS=$OPTARG ;;
+		o) OUT=$OPTARG ;;
+		w) WORK=$OPTARG ;;
+		e) EROFS_MODE=$OPTARG ;;
+		s) EROFS_SRC=$OPTARG ;;
+		k) EROFS_KO=$OPTARG ;;
+		x) verify=0 ;;
+		h) cat <<USAGE
+usage: bench run [-n runs] [-e module|kernel] [-s erofs-freebsd tree]
+                 [-k erofs.ko] [-o result dir] [-w work dir] [-x] [board..]
+  -n  rounds per variant and workload, default 5
+  -e  erofs mode: module builds and loads erofs.ko (default),
+      kernel uses erofs of the running kernel
+  -s  erofs-freebsd source tree (module mode)
+  -k  prebuilt erofs.ko (module mode)
+  -x  skip the content verification pass
+The disk image from "bench build-image" must be attached; its partitions
+appear as /dev/gpt/<label>.
+USAGE
+		   exit 0 ;;
+		*) usage ;;
+		esac
+	done
+	shift $((OPTIND - 1))
+	[ "$(uname -s)" = FreeBSD ] || die "bench run must run on FreeBSD"
+	[ "$(id -u)" -eq 0 ] || die "bench run needs root"
+	boards=${*:-$BOARDS}
+	[ "$boards" = all ] && boards=$BOARDS
+
+	WORK=${WORK:-/var/tmp/erofs-bench}
+	[ -n "$OUT" ] || OUT=$here/../results/$(date +%Y%m%d-%H%M%S)
+	mkdir -p "$WORK" "$OUT"
+	OUT=$(cd "$OUT" && pwd)
+	export EROFS_MODE EROFS_SRC EROFS_KO WORK
+
+	. "$here/lib/erofs_env.sh"
+	. "$here/lib/fsops.sh"
+	. "$here/lib/runner.sh"
+
+	# Read the layout and the manifest from the meta partition.
+	META=$WORK/meta
+	rm -rf "$META"
+	mkdir -p "$META"
+	[ -e /dev/gpt/meta ] || die "/dev/gpt/meta not found, is the disk image attached?"
+	tar -xf /dev/gpt/meta -C "$META" || die "cannot read the meta partition"
+
+	RDBENCH=$WORK/rdbench
+	build_rdbench "$RDBENCH" "$here"
+
+	erofs_setup
+	fs_describe >"$OUT/env.txt"
+	echo "erofs_mode=$EROFS_MODE runs=$RUNS" >>"$OUT/env.txt"
+	[ -n "$EROFS_KO" ] && sha256 -q "$EROFS_KO" >>"$OUT/env.txt"
+	echo "board,workload,fs,state,run,files,bytes,secs,errors" >"$OUT/raw.csv"
+	: >"$OUT/extra.md"
+
+	if [ "$verify" -eq 1 ]; then
+		verify_all || die "content verification failed, results would be meaningless"
+	fi
+
+	for b in $boards; do
+		f=$(board_file "$b")
+		log "== board $b =="
+		(
+			. "$f"
+			board_main
+		)
+	done
+
+	{
+		echo "# erofs read benchmark"
+		echo ""
+		echo "rounds: $RUNS, erofs mode: $EROFS_MODE"
+		awk -F, -f "$here/summary.awk" "$OUT/raw.csv"
+		cat "$OUT/extra.md"
+	} >"$OUT/summary.md"
+	rm -f "$OUT/extra.md"
+	log "results in $OUT (summary.md, raw.csv, env.txt)"
+	cat "$OUT/summary.md"
+}
+
+[ $# -ge 1 ] || usage
+sub=$1
+shift
+case $sub in
+build-image) cmd_build_image "$@" ;;
+run) cmd_run "$@" ;;
+list) cmd_list ;;
+-h|--help|help) usage 0 ;;
+*) usage ;;
+esac
